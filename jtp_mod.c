@@ -8,6 +8,9 @@
 #include <linux/skbuff.h>
 #include <net/protocol.h>
 #include <net/inet_common.h>
+#include <linux/module.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #define MAX_JTP_PROTO 254
 
@@ -21,32 +24,38 @@ struct jtp_hdr {
 };
 
 // Обработчик входящих пакетов
+static atomic64_t jtp_total_bytes = ATOMIC64_INIT(0);
+static atomic64_t jtp_packets_count = ATOMIC64_INIT(0);
+
+// Обработчик входящих пакетов
 int jtp_rcv(struct sk_buff *skb) {
-    struct jtp_hdr *jtp_h;
-    static unsigned long total_bytes = 0;
+    atomic64_add(skb->len, &jtp_total_bytes);
+    atomic64_inc(&jtp_packets_count);
 
-    // Проверка: достаточно ли данных для нашего заголовка?
-    if (!pskb_may_pull(skb, sizeof(struct jtp_hdr))) {
-        kfree_skb(skb);
-        return 0;
-    }
-
-    jtp_h = (struct jtp_hdr *)skb_transport_header(skb);
-    total_bytes += skb->len;
-
-    // Логируем прогресс каждые 100МБ
-    if (total_bytes % (100 * 1024 * 1024) == 0) {
-        printk(KERN_INFO "JTP: Received chunk %u. Total: %lu MB\n",
-               be32_to_cpu(jtp_h->chunk_id), total_bytes / 1024 / 1024);
-    }
-
-    consume_skb(skb); // Правильный способ освобождения в новых ядрах
+    consume_skb(skb);
     return 0;
 }
 
-static const struct net_protocol jtp_protocol = {
-    .handler = jtp_rcv,
-    .no_policy = 1,
+// Вывод статистики в /proc/jtp_stats
+static int jtp_stats_show(struct seq_file *m, void *v) {
+    u64 bytes = atomic64_read(&jtp_total_bytes);
+    u64 pkts = atomic64_read(&jtp_packets_count);
+
+    seq_printf(m, "--- Jerboa Transport Protocol (JTP) Stats ---\n");
+    seq_printf(m, "Total Received: %llu bytes (%llu MB)\n", bytes, bytes >> 20);
+    seq_printf(m, "Packets Count:  %llu\n", pkts);
+    seq_printf(m, "Status:         Active (NASA-mode: On)\n");
+    return 0;
+}
+
+static int jtp_stats_open(struct inode *inode, struct file *file) {
+    return single_open(file, jtp_stats_show, NULL);
+}
+
+static const struct proc_ops jtp_proc_ops = {
+    .proc_open = jtp_stats_open,
+    .proc_read = seq_read,
+    .proc_release = single_release,
 };
 
 static int __init jtp_init(void) {
@@ -56,12 +65,14 @@ static int __init jtp_init(void) {
         return -1;
     }
     pr_info("JTP: Jerboa Protocol Module Loaded on 6.8.0 (Proto: %d)\n", MAX_JTP_PROTO);
+    proc_create("jtp_stats", 0, NULL, &jtp_proc_ops);
     return 0;
 }
 
 static void __exit jtp_exit(void) {
     inet_del_protocol(&jtp_protocol, MAX_JTP_PROTO);
     pr_info("JTP: Jerboa Protocol Module Unloaded\n");
+    remove_proc_entry("jtp_stats", NULL);
 }
 
 module_init(jtp_init);
